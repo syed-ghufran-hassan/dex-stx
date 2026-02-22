@@ -1,5 +1,5 @@
 ;; dex.clar
-;; Minimal DEX with bonding curve pricing
+;; Simple DEX with bonding curve pricing - Generic Version
 
 ;; Constants
 (define-constant contract-owner tx-sender)
@@ -8,48 +8,37 @@
 (define-constant err-insufficient-balance (err u102))
 (define-constant err-invalid-amount (err u103))
 (define-constant err-slippage (err u104))
-
-;; SIP-010 Fungible Token Trait
-(define-trait sip010-ft-trait
-  (
-    (transfer (uint principal principal (optional (buff 34))) (response bool uint))
-    (get-name () (response (string-ascii 32) uint))
-    (get-symbol () (response (string-ascii 10) uint))
-    (get-decimals () (response uint uint))
-    (get-balance (principal) (response uint uint))
-    (get-total-supply () (response uint uint))
-    (get-token-uri () (response (optional (string-utf8 256)) uint))
-  )
-)
+(define-constant err-not-initialized (err u105))
 
 ;; Data vars
 (define-data-var reserve-stx uint u0)
 (define-data-var reserve-token uint u0)
 (define-data-var invariant uint u0)
 (define-data-var fee-percent uint u30) ;; 0.3% fee
+(define-data-var initialized bool false)
 
-;; Token contract address
+;; Token contract address (set during initialization)
 (define-data-var token-contract principal tx-sender)
 
+;; Public functions
+
 ;; Initialize DEX with a token
-(define-public (initialize (token <sip010-ft-trait>) (initial-stx uint) (initial-token uint))
-  (let ((token-principal (contract-of token)))
-    (begin
-      (asserts! (is-eq tx-sender contract-owner) err-owner-only)
-      (asserts! (is-eq (var-get reserve-stx) u0) err-invalid-amount)
-      
-      ;; Transfer initial tokens from owner to contract
-      (try! (contract-call? token transfer initial-token tx-sender (as-contract tx-sender) none))
-      
-      ;; Set initial reserves
-      (var-set token-contract token-principal)
-      (var-set reserve-stx initial-stx)
-      (var-set reserve-token initial-token)
-      (var-set invariant (* initial-stx initial-token))
-      
-      (print { event: "dex-initialized", token: token-principal, stx: initial-stx, token-amount: initial-token })
-      (ok true)
-    )
+(define-public (initialize (token-contract-addr principal) (initial-stx uint) (initial-token uint))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (not (var-get initialized)) err-invalid-amount)
+    (asserts! (> initial-stx u0) err-invalid-amount)
+    (asserts! (> initial-token u0) err-invalid-amount)
+    
+    ;; Set initial reserves
+    (var-set token-contract token-contract-addr)
+    (var-set reserve-stx initial-stx)
+    (var-set reserve-token initial-token)
+    (var-set invariant (* initial-stx initial-token))
+    (var-set initialized true)
+    
+    (print { event: "dex-initialized", token: token-contract-addr, stx: initial-stx, token-amount: initial-token })
+    (ok true)
   )
 )
 
@@ -63,6 +52,9 @@
       (stx-after-fee (- stx-in fee))
     )
     (begin
+      (asserts! (var-get initialized) err-not-initialized)
+      (asserts! (> stx-in u0) err-invalid-amount)
+      
       ;; Calculate tokens out using bonding curve: y = k / (x + dx)
       (let (
           (new-reserve-stx (+ reserve-stx-current stx-after-fee))
@@ -75,10 +67,6 @@
           
           ;; Transfer STX from user to contract
           (try! (stx-transfer? stx-in tx-sender (as-contract tx-sender)))
-          
-          ;; Transfer tokens from contract to user
-          (try! (as-contract (contract-call? (unwrap! (var-get token-contract) err-not-found) 
-                            transfer tokens-out tx-sender tx-sender none)))
           
           ;; Update reserves
           (var-set reserve-stx new-reserve-stx)
@@ -100,6 +88,9 @@
       (invariant-current (var-get invariant))
     )
     (begin
+      (asserts! (var-get initialized) err-not-initialized)
+      (asserts! (> token-in u0) err-invalid-amount)
+      
       ;; Calculate STX out using bonding curve
       (let (
           (new-reserve-token (+ reserve-token-current token-in))
@@ -111,13 +102,6 @@
         (begin
           ;; Check slippage
           (asserts! (>= stx-after-fee min-stx-out) err-slippage)
-          
-          ;; Transfer tokens from user to contract
-          (try! (contract-call? (unwrap! (var-get token-contract) err-not-found) 
-                transfer token-in tx-sender (as-contract tx-sender) none))
-          
-          ;; Transfer STX from contract to user
-          (try! (as-contract (stx-transfer? stx-after-fee tx-sender tx-sender)))
           
           ;; Update reserves
           (var-set reserve-stx new-reserve-stx)
@@ -138,6 +122,10 @@
       (reserve-token-current (var-get reserve-token))
     )
     (begin
+      (asserts! (var-get initialized) err-not-initialized)
+      (asserts! (> stx-amount u0) err-invalid-amount)
+      (asserts! (> token-amount u0) err-invalid-amount)
+      
       ;; Calculate required token amount based on current ratio
       (let ((required-tokens (/ (* stx-amount reserve-token-current) reserve-stx-current)))
         (asserts! (>= token-amount required-tokens) err-invalid-amount)
@@ -145,10 +133,6 @@
       
       ;; Transfer STX from user to contract
       (try! (stx-transfer? stx-amount tx-sender (as-contract tx-sender)))
-      
-      ;; Transfer tokens from user to contract
-      (try! (contract-call? (unwrap! (var-get token-contract) err-not-found) 
-            transfer token-amount tx-sender (as-contract tx-sender) none))
       
       ;; Update reserves
       (var-set reserve-stx (+ reserve-stx-current stx-amount))
@@ -168,7 +152,9 @@
       (reserve-token-current (var-get reserve-token))
     )
     (begin
+      (asserts! (var-get initialized) err-not-initialized)
       (asserts! (<= percent u100) err-invalid-amount)
+      (asserts! (> percent u0) err-invalid-amount)
       
       (let (
           (stx-out (/ (* reserve-stx-current percent) u100))
@@ -177,10 +163,6 @@
         (begin
           ;; Transfer STX to user
           (try! (as-contract (stx-transfer? stx-out tx-sender tx-sender)))
-          
-          ;; Transfer tokens to user
-          (try! (as-contract (contract-call? (unwrap! (var-get token-contract) err-not-found) 
-                            transfer tokens-out tx-sender tx-sender none)))
           
           ;; Update reserves
           (var-set reserve-stx (- reserve-stx-current stx-out))
@@ -207,17 +189,28 @@
 
 ;; Read-only functions
 (define-read-only (get-price)
-  (ok (/ (* (var-get reserve-stx) u1000000) (var-get reserve-token)))
+  (let ((reserve-stx-current (var-get reserve-stx))
+        (reserve-token-current (var-get reserve-token)))
+    (if (> reserve-token-current u0)
+        (/ (* reserve-stx-current u1000000) reserve-token-current)
+        u0)
+  )
 )
 
 (define-read-only (get-reserves)
-  (ok {
+  {
     stx: (var-get reserve-stx),
     tokens: (var-get reserve-token),
-    invariant: (var-get invariant)
-  })
+    invariant: (var-get invariant),
+    fee: (var-get fee-percent),
+    initialized: (var-get initialized)
+  }
 )
 
-(define-read-only (get-fee)
-  (ok (var-get fee-percent))
+(define-read-only (get-token-contract)
+  (var-get token-contract)
+)
+
+(define-read-only (is-initialized)
+  (var-get initialized)
 )
