@@ -20,6 +20,12 @@
 ;; Token contract address (set during initialization)
 (define-data-var token-contract principal tx-sender)
 
+;; LP Shares Map
+(define-map lp-shares
+  { provider: principal }
+  { shares: uint }
+)
+
 ;; Public functions
 
 ;; Initialize DEX with a token
@@ -138,6 +144,10 @@
       (var-set reserve-stx (+ reserve-stx-current stx-amount))
       (var-set reserve-token (+ reserve-token-current token-amount))
       (var-set invariant (* (var-get reserve-stx) (var-get reserve-token)))
+
+      ;; Update LP shares
+      (let ((existing-shares (default-to u0 (map-get? lp-shares { provider: tx-sender }))))
+        (map-set lp-shares { provider: tx-sender } { shares: (+ existing-shares stx-amount) }))
       
       (print { event: "liquidity-added", provider: tx-sender, stx: stx-amount, tokens: token-amount })
       (ok true)
@@ -150,6 +160,7 @@
   (let (
       (reserve-stx-current (var-get reserve-stx))
       (reserve-token-current (var-get reserve-token))
+      (existing-shares (default-to u0 (map-get? lp-shares { provider: tx-sender })))
     )
     (begin
       (asserts! (var-get initialized) err-not-initialized)
@@ -159,6 +170,7 @@
       (let (
           (stx-out (/ (* reserve-stx-current percent) u100))
           (tokens-out (/ (* reserve-token-current percent) u100))
+          (shares-out (/ (* existing-shares percent) u100))
         )
         (begin
           ;; Transfer STX to user
@@ -168,6 +180,9 @@
           (var-set reserve-stx (- reserve-stx-current stx-out))
           (var-set reserve-token (- reserve-token-current tokens-out))
           (var-set invariant (* (var-get reserve-stx) (var-get reserve-token)))
+
+          ;; Update LP shares
+          (map-set lp-shares { provider: tx-sender } { shares: (- existing-shares shares-out) })
           
           (print { event: "liquidity-removed", provider: tx-sender, stx: stx-out, tokens: tokens-out })
           (ok true)
@@ -213,4 +228,9 @@
 
 (define-read-only (is-initialized)
   (var-get initialized)
+)
+
+;; Read-only: Get LP shares for a provider
+(define-read-only (get-lp-shares (provider principal))
+  (default-to u0 (map-get? lp-shares { provider: provider }))
 )
